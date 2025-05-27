@@ -1,49 +1,84 @@
-import serial
-import adafruit_fingerprint
+import time
 import requests
-import pandas as pd
-from datetime import datetime
+from pyfingerprint.pyfingerprint import PyFingerprint
 
-uart = serial.Serial("/dev/ttyUSB0", baudrate=57600, timeout=1)
-finger = adafruit_fingerprint.Adafruit_Fingerprint(uart)
+API_AUTH_URL = "http://YOUR_PC_IP:5000/authenticate_fingerprint"
+API_UPDATE_URL = "http://YOUR_PC_IP:5000/update_fingerprint"
 
-API_ENDPOINT = "http://_:5000/store_attendance" #change
+## Initialize fingerprint sensor
+try:
+    f = PyFingerprint('/dev/ttyAMA0', 57600, 0xFFFFFFFF, 0x00000000)
 
-EXCEL_FILE = "team_members.xlsx" #change
+    if not f.verifyPassword():
+        raise ValueError("The given fingerprint sensor password is wrong!")
 
-def load_existing_users():
-    try:
-        df = pd.read_excel(EXCEL_FILE)
-        return df.set_index("ID").to_dict(orient="index")  
-    except FileNotFoundError:
-        return {}
+except Exception as e:
+    print("The fingerprint sensor could not be initialized!")
+    print("Exception message:", str(e))
+    exit(1)
 
-def authenticate_fingerprint():
-    print("Place your finger for authentication...")
-    if finger.fingerprint_search() != adafruit_fingerprint.OK:
-        print("Fingerprint not recognized. Please register first.")
-        return None
-    user_id = str(finger.finger_id)
-    print(f"Authenticated! User ID: {user_id}")
-    return user_id
+print("Currently used templates:", f.getTemplateCount(), "/", f.getStorageCapacity())
 
-def send_attendance(user_id, user_info):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    payload = {
-        "user_id": user_id,
-        "name": user_info["Name"],
-        "branch": user_info["Branch"],
-        "degree": user_info["Degree"],
-        "timestamp": timestamp
+## Authenticate or enroll fingerprint
+try:
+    print("Waiting for finger...")
+
+    while not f.readImage():
+        pass
+
+    f.convertImage(0x01)
+
+    result = f.searchTemplate()
+    positionNumber = result[0]
+
+    ## Step 1: Check if fingerprint exists on PC
+    response = requests.post(API_AUTH_URL, json={"Template Position": positionNumber})
+
+    if response.status_code == 200:
+        auth_data = response.json()
+        if auth_data.get("authenticated"):
+            user_info = auth_data.get("user")
+            print(f"Authentication successful! Welcome {user_info['Name']} (ID: {user_info['ID']})")
+            exit(0)
+        else:
+            print("Fingerprint not found! Proceeding with enrollment...")
+
+    ## Step 2: Enroll new fingerprint if not found
+    print("Remove finger...")
+    time.sleep(2)
+
+    print("Waiting for same finger again...")
+
+    while not f.readImage():
+        pass
+
+    f.convertImage(0x02)
+
+    if f.compareCharacteristics() == 0:
+        raise Exception("Fingers do not match")
+
+    f.createTemplate()
+    positionNumber = f.storeTemplate()
+    print("Finger enrolled successfully!")
+    print("New template position #", positionNumber)
+
+    ## Step 3: Prompt user for details and send data to PC
+    user_data = {
+        "Name": input("Enter your Name: "),
+        "ID": input("Enter your ID: "),
+        "Branch": input("Enter your Branch: "),
+        "Year": input("Enter your Year: "),
+        "Template Position": positionNumber
     }
-    response = requests.post(API_ENDPOINT, json=payload)
-    print("Attendance recorded:", response.text)
 
-if __name__ == "__main__":
-    users = load_existing_users()
-    user_id = authenticate_fingerprint()
+    response = requests.post(API_UPDATE_URL, json=user_data)
 
-    if user_id and user_id in users:
-        send_attendance(user_id, users[user_id])
+    if response.status_code == 200:
+        print("Fingerprint data updated successfully on PC!")
     else:
-        print("User not found in records. Please register first.")
+        print("Failed to update fingerprint data:", response.text)
+
+except Exception as e:
+    print("Operation failed!")
+    print("Exception message:", str(e))
+    exit()

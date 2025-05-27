@@ -1,40 +1,77 @@
-import serial
-import adafruit_fingerprint
+import time
 import pandas as pd
-from datetime import datetime
+from pyfingerprint.pyfingerprint import PyFingerprint
 
-# Setup Fingerprint Scanner (via CP2102)
-uart = serial.Serial("/dev/ttyUSB0", baudrate=57600, timeout=1)
-finger = adafruit_fingerprint.Adafruit_Fingerprint(uart)
+## Initialize fingerprint sensor
+try:
+    f = PyFingerprint('/dev/ttyAMA0', 57600, 0xFFFFFFFF, 0x00000000)
 
-EXCEL_FILE = "team_members.xlsx"
+    if not f.verifyPassword():
+        raise ValueError('The given fingerprint sensor password is wrong!')
 
-def enroll_fingerprint():
-    print("Enrolling fingerprint... Place your finger on the scanner.")
-    while finger.get_fpdata(location=finger.FINGERPRINT_CHARBUFFER1) != adafruit_fingerprint.OK:
+except Exception as e:
+    print('The fingerprint sensor could not be initialized!')
+    print('Exception message:', str(e))
+    exit(1)
+
+print('Currently used templates:', f.getTemplateCount(), '/', f.getStorageCapacity())
+
+## Enroll new fingerprint
+try:
+    print('Waiting for finger...')
+
+    while not f.readImage():
         pass
-    finger.create_model()
-    finger.store_model(finger.library_size + 1)  
-    user_id = str(finger.library_size)
-    print(f"Fingerprint saved with ID: {user_id}")
-    return user_id
 
-def register_new_user():
-    user_id = enroll_fingerprint()
-    name = input("Enter Name: ")
-    branch = input("Enter Branch: ")
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    f.convertImage(0x01)
 
+    result = f.searchTemplate()
+    positionNumber = result[0]
+
+    if positionNumber >= 0:
+        print('Template already exists at position #', positionNumber)
+        exit(0)
+
+    print('Remove finger...')
+    time.sleep(2)
+
+    print('Waiting for same finger again...')
+
+    while not f.readImage():
+        pass
+
+    f.convertImage(0x02)
+
+    if f.compareCharacteristics() == 0:
+        raise Exception('Fingers do not match')
+
+    f.createTemplate()
+    positionNumber = f.storeTemplate()
+    print('Finger enrolled successfully!')
+    print('New template position #', positionNumber)
+
+    ## Prompt user for details
+    name = input("Enter your Name: ")
+    user_id = input("Enter your ID: ")
+    branch = input("Enter your Branch: ")
+    year = input("Enter your Year: ")
+
+    ## Create data dictionary
+    data = {'Name': [name], 'ID': [user_id], 'Branch': [branch], 'Year': [year], 'Template Position': [positionNumber]}
+
+    ## Load existing data or create new Excel file
     try:
-        df = pd.read_excel(EXCEL_FILE)
+        df_existing = pd.read_excel('fingerprint_data.xlsx')
+        df_new = pd.DataFrame(data)
+        df_combined = pd.concat([df_existing, df_new], ignore_index=True)
     except FileNotFoundError:
-        df = pd.DataFrame(columns=["Name", "User ID", "Branch", "Timestamp"])
+        df_combined = pd.DataFrame(data)
 
-    new_entry = pd.DataFrame({"Name": [name], "User ID": [user_id], "Branch": [branch], "Timestamp": [timestamp]})
-    df = pd.concat([df, new_entry], ignore_index=True)
-    df.to_excel(EXCEL_FILE, index=False)
+    ## Save to Excel file
+    df_combined.to_excel('fingerprint_data.xlsx', index=False)
+    print('User details saved successfully!')
 
-    print(f"New user '{name}' registered successfully!")
-
-if __name__ == "__main__":
-    register_new_user()
+except Exception as e:
+    print('Operation failed!')
+    print('Exception message:', str(e))
+    exit()
